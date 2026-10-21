@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { View, TouchableOpacity } from 'react-native'
+import { View } from 'react-native'
 
 import { useTheme } from '@/store/theme/hook'
 import { useI18n } from '@/lang'
@@ -31,8 +31,13 @@ export default memo(({ item }: {
     }
   }
 
+  const handleRetry = async() => {
+    await downloadManager.retryTask(item.id)
+  }
+
   const isError = item.status === 'error'
   const isCompleted = item.status === 'completed'
+  const canRetry = isError || item.status === 'pause'
 
   return (
     <View style={{ ...styles.container, borderBottomColor: theme['c-border-background'] }}>
@@ -64,7 +69,12 @@ export default memo(({ item }: {
         }
       </View>
       <View style={styles.action}>
-        <Text style={styles.deleteBtn} onPress={handleDelete} color={theme['c-error']}>{t('download_delete')}</Text>
+        {
+          canRetry
+            ? <Text style={styles.actionBtn} onPress={handleRetry} color={theme['c-primary']}>{t('download_retry')}</Text>
+            : null
+        }
+        <Text style={styles.actionBtn} onPress={handleDelete} color={theme['c-error']}>{t('download_delete')}</Text>
       </View>
     </View>
   )
@@ -99,8 +109,10 @@ const styles = createStyle({
   },
   action: {
     flexShrink: 0,
+    flexDirection: 'row',
+    gap: 8,
   },
-  deleteBtn: {
+  actionBtn: {
     padding: 8,
   },
 })
