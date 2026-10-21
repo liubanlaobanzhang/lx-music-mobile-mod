@@ -1,6 +1,6 @@
 # lx-music-mobile 项目完整注解
 
-> 洛雪音乐助手 Android 版 | React Native 0.73 | v1.8.4
+> 洛雪音乐助手 Android 版 | React Native 0.73 | v1.9.1
 > 生成时间: 2025-07-18
 
 ---
