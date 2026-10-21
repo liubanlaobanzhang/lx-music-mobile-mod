@@ -379,10 +379,6 @@ declare global {
        * 是否启用同步
        */
       'sync.enable': boolean
-    }
-  }
-}
-
 
   /**
    * 播放详情背景类型
@@ -478,3 +474,7 @@ declare global {
    * 进度条流光特效
    */
   'playDetail.progress.shimmer': boolean
+
+    }
+  }
+}

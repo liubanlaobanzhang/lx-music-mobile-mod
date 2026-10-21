@@ -18,6 +18,8 @@ interface DownloadQueueItem {
 
 let activeCount = 0
 let queue: DownloadQueueItem[] = []
+// 记录每个下载任务对应的原生下载 jobId,用于真正停止正在进行的下载
+const jobIds = new Map<string, number>()
 
 const formatSpeed = (bytesPerSecond: number): string => {
   if (bytesPerSecond > 1024 * 1024) {
@@ -36,17 +38,14 @@ const parseErrorMessage = (err: any): string => {
   return message
 }
 
-const processNextInQueue = () => {
-  if (queue.length === 0 || activeCount >= MAX_CONCURRENT) return
-
-  const next = queue.shift()!
+function startJob(item: DownloadQueueItem): void {
   activeCount++
 
-  updateTask(next.task.id, { status: 'run' })
+  updateTask(item.task.id, { status: 'run' })
 
   const downloadOptions: RNFS.DownloadFileOptions = {
-    fromUrl: next.task.metadata.url ?? '',
-    toFile: next.task.metadata.filePath,
+    fromUrl: item.task.metadata.url ?? '',
+    toFile: item.task.metadata.filePath,
     background: true,
     discretionary: false,
     progressInterval: 500,
@@ -56,7 +55,7 @@ const processNextInQueue = () => {
     progress: (res) => {
       const progress = res.contentLength > 0 ? res.bytesWritten / res.contentLength : 0
       const speed = res.bytesWrittenPerSecond ?? 0
-      next.onProgress({
+      item.onProgress({
         progress,
         speed: formatSpeed(speed),
         downloaded: res.bytesWritten,
@@ -65,22 +64,32 @@ const processNextInQueue = () => {
     },
   }
 
-  RNFS.downloadFile(downloadOptions).promise
+  const job = RNFS.downloadFile(downloadOptions)
+  jobIds.set(item.task.id, job.jobId)
+
+  job.promise
     .then((res) => {
-      activeCount--
+      if (jobIds.get(item.task.id) === job.jobId) jobIds.delete(item.task.id)
       if (res.statusCode === 200 || res.statusCode === 206) {
-        next.onComplete(next.task.id, res.bytesWritten)
+        item.onComplete(item.task.id, res.bytesWritten)
       } else {
-        next.onError(next.task.id, `HTTP ${res.statusCode}: ${res.description ?? ''}`)
+        item.onError(item.task.id, `HTTP ${res.statusCode}: ${res.description ?? ''}`)
       }
     })
     .catch((err) => {
-      activeCount--
-      next.onError(next.task.id, parseErrorMessage(err))
+      if (jobIds.get(item.task.id) === job.jobId) jobIds.delete(item.task.id)
+      item.onError(item.task.id, parseErrorMessage(err))
     })
     .finally(() => {
+      activeCount--
       processNextInQueue()
     })
+}
+
+function processNextInQueue() {
+  if (queue.length === 0 || activeCount >= MAX_CONCURRENT) return
+
+  startJob(queue.shift()!)
 }
 
 export const enqueueDownload = (
@@ -89,55 +98,31 @@ export const enqueueDownload = (
   onComplete: (taskId: string, fileSize: number) => void,
   onError: (taskId: string, error: string) => void,
 ): void => {
+  const item: DownloadQueueItem = { task, onProgress, onComplete, onError }
+
   if (activeCount < MAX_CONCURRENT) {
-    activeCount++
-    updateTask(task.id, { status: 'run' })
-
-    const downloadOptions: RNFS.DownloadFileOptions = {
-      fromUrl: task.metadata.url ?? '',
-      toFile: task.metadata.filePath,
-      background: true,
-      discretionary: false,
-      progressInterval: 500,
-      begin: (res) => {
-        console.log('[Download] begin:', res.jobId)
-      },
-      progress: (res) => {
-        const progress = res.contentLength > 0 ? res.bytesWritten / res.contentLength : 0
-        const speed = res.bytesWrittenPerSecond ?? 0
-        onProgress({
-          progress,
-          speed: formatSpeed(speed),
-          downloaded: res.bytesWritten,
-          total: res.contentLength,
-        })
-      },
-    }
-
-    RNFS.downloadFile(downloadOptions).promise
-      .then((res) => {
-        activeCount--
-        if (res.statusCode === 200 || res.statusCode === 206) {
-          onComplete(task.id, res.bytesWritten)
-        } else {
-          onError(task.id, `HTTP ${res.statusCode}: ${res.description ?? ''}`)
-        }
-      })
-      .catch((err) => {
-        activeCount--
-        onError(task.id, parseErrorMessage(err))
-      })
-      .finally(() => {
-        processNextInQueue()
-      })
+    startJob(item)
   } else {
     updateTask(task.id, { status: 'waiting' })
-    queue.push({ task, onProgress, onComplete, onError })
+    queue.push(item)
   }
 }
 
 export const stopDownload = (taskId: string): void => {
-  RNFS.stopDownload(taskId)
+  // 若任务还在等待队列中,直接移除,避免被调度起来
+  const queueIndex = queue.findIndex(item => item.task.id === taskId)
+  if (queueIndex > -1) queue.splice(queueIndex, 1)
+
+  // 正在下载的任务,需要通过 jobId 停止原生下载
+  const jobId = jobIds.get(taskId)
+  if (jobId == null) return
+
+  jobIds.delete(taskId)
+  try {
+    RNFS.stopDownload(jobId)
+  } catch (err) {
+    console.warn('[Download] stopDownload failed:', err)
+  }
 }
 
 export const getAvailableStorage = async(): Promise<number> => {

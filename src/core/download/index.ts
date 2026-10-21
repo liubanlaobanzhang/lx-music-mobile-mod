@@ -87,6 +87,139 @@ const isMusicInList = (musicInfo: LX.Music.MusicInfoOnline): boolean => {
     || downloadState.history.some(h => h.musicInfo.id === musicInfo.id)
 }
 
+/**
+ * 真正执行一个下载任务:获取播放地址 → 入队下载
+ * @param isRefreshUrl 是否强制刷新歌曲地址(重试时使用,旧地址通常已失效)
+ */
+async function runTask(taskId: string, isRefreshUrl = false): Promise<void> {
+  const task = downloadState.tasks.find(t => t.id === taskId)
+  if (!task) return
+
+  const musicInfo = task.metadata.musicInfo
+
+  try {
+    await ensureDirectory(await getSaveDirectory())
+
+    const url = await getOnlineMusicUrl({
+      musicInfo,
+      quality: task.metadata.quality,
+      isRefresh: isRefreshUrl,
+    })
+
+    if (!url) {
+      updateTask(taskId, {
+        status: 'error',
+        statusText: global.i18n.t('download_url_failed'),
+      })
+      await saveDownloadTasks([...downloadState.tasks])
+      downloadEvent.downloadListUpdate()
+      toast(global.i18n.t('download_url_failed'))
+      return
+    }
+
+    updateTask(taskId, {
+      status: 'run',
+      statusText: '',
+      metadata: { ...task.metadata, url },
+    })
+    await saveDownloadTasks([...downloadState.tasks])
+    downloadEvent.downloadListUpdate()
+
+    const updatedTask = downloadState.tasks.find(t => t.id === taskId)
+    if (!updatedTask) return
+
+    enqueueDownload(
+      updatedTask,
+      (progress) => {
+        updateTask(taskId, {
+          progress: progress.progress,
+          speed: progress.speed,
+          downloaded: progress.downloaded,
+          total: progress.total,
+          statusText: `Downloading... ${(progress.progress * 100).toFixed(1)}%`,
+        })
+      },
+      async(completedTaskId, fileSize) => {
+        updateTask(completedTaskId, {
+          isComplate: true,
+          status: 'completed',
+          statusText: 'Completed',
+          total: fileSize,
+        })
+
+        const completedTask = downloadState.tasks.find(t => t.id === completedTaskId)
+        if (!completedTask) return
+
+        // Save lyric
+        try {
+          const lyricInfo = await fetchOnlineLyricInfo({
+            musicInfo: completedTask.metadata.musicInfo,
+            isRefresh: false,
+          })
+          await saveLyricFile(lyricInfo, completedTask.metadata.filePath)
+        } catch {
+          // Ignore lyric errors
+        }
+
+        // Save cover
+        try {
+          const picUrl = await getOnlinePicUrl({
+            musicInfo: completedTask.metadata.musicInfo,
+            isRefresh: false,
+          })
+          if (picUrl) {
+            await saveCoverFile(picUrl, completedTask.metadata.filePath)
+          }
+        } catch {
+          // Ignore cover errors
+        }
+
+        const historyItem: LX.Download.DownloadHistoryItem = {
+          id: completedTask.id,
+          musicInfo: completedTask.metadata.musicInfo,
+          quality: completedTask.metadata.quality,
+          ext: completedTask.metadata.ext,
+          fileName: completedTask.metadata.fileName,
+          filePath: completedTask.metadata.filePath,
+          status: 'completed',
+          downloadedSize: completedTask.downloaded,
+          fileSize: completedTask.total,
+          addedTime: Date.now(),
+          completedTime: Date.now(),
+          errorMessage: null,
+        }
+
+        addHistory(historyItem)
+        removeTask(completedTaskId)
+
+        await saveDownloadTasks(downloadState.tasks.filter(t => t.id !== completedTaskId))
+        await saveDownloadHistory([...downloadState.history])
+
+        downloadEvent.downloadListUpdate()
+        downloadEvent.downloadHistoryUpdate()
+      },
+      async(completedTaskId, error) => {
+        updateTask(completedTaskId, {
+          status: 'error',
+          statusText: error,
+        })
+        await saveDownloadTasks([...downloadState.tasks])
+        downloadEvent.downloadListUpdate()
+        toast(global.i18n.t('download_failed') + ': ' + error)
+      },
+    )
+  } catch (err: any) {
+    console.error('[Download] Failed to run task:', err)
+    updateTask(taskId, {
+      status: 'error',
+      statusText: err.message || global.i18n.t('download_failed'),
+    })
+    await saveDownloadTasks([...downloadState.tasks])
+    downloadEvent.downloadListUpdate()
+    toast(global.i18n.t('download_failed'))
+  }
+}
+
 const addTaskWithDownload = async(musicInfo: LX.Music.MusicInfoOnline, quality?: LX.Quality): Promise<boolean> => {
   if (isMusicInList(musicInfo)) {
     toast(global.i18n.t('download_exists_tip'))
@@ -140,129 +273,7 @@ const addTaskWithDownload = async(musicInfo: LX.Music.MusicInfoOnline, quality?:
 
     toast(global.i18n.t('download_add_tip'))
 
-    void (async() => {
-      try {
-        await ensureDirectory(saveDir)
-
-        const url = await getOnlineMusicUrl({
-          musicInfo,
-          quality: downloadQuality,
-          isRefresh: false,
-        })
-
-        if (!url) {
-          updateTask(taskId, {
-            status: 'error',
-            statusText: global.i18n.t('download_url_failed'),
-          })
-          await saveDownloadTasks([...downloadState.tasks])
-          downloadEvent.downloadListUpdate()
-          toast(global.i18n.t('download_url_failed'))
-          return
-        }
-
-        updateTask(taskId, {
-          status: 'run',
-          statusText: '',
-          metadata: { ...task.metadata, url },
-        })
-        await saveDownloadTasks([...downloadState.tasks])
-        downloadEvent.downloadListUpdate()
-
-        const updatedTask = downloadState.tasks.find(t => t.id === taskId)
-        if (!updatedTask) return
-
-        enqueueDownload(
-          updatedTask,
-          (progress) => {
-            updateTask(taskId, {
-              progress: progress.progress,
-              speed: progress.speed,
-              downloaded: progress.downloaded,
-              total: progress.total,
-              statusText: `Downloading... ${(progress.progress * 100).toFixed(1)}%`,
-            })
-          },
-          async(completedTaskId, fileSize) => {
-            updateTask(completedTaskId, {
-              isComplate: true,
-              status: 'completed',
-              statusText: 'Completed',
-              total: fileSize,
-            })
-
-            const completedTask = downloadState.tasks.find(t => t.id === completedTaskId)
-            if (!completedTask) return
-
-            // Save lyric
-            try {
-              const lyricInfo = await fetchOnlineLyricInfo({
-                musicInfo,
-                isRefresh: false,
-              })
-              await saveLyricFile(lyricInfo, completedTask.metadata.filePath)
-            } catch {
-              // Ignore lyric errors
-            }
-
-            // Save cover
-            try {
-              const picUrl = await getOnlinePicUrl({
-                musicInfo,
-                isRefresh: false,
-              })
-              if (picUrl) {
-                await saveCoverFile(picUrl, completedTask.metadata.filePath)
-              }
-            } catch {
-              // Ignore cover errors
-            }
-
-            const historyItem: LX.Download.DownloadHistoryItem = {
-              id: completedTask.id,
-              musicInfo: completedTask.metadata.musicInfo,
-              quality: completedTask.metadata.quality,
-              ext: completedTask.metadata.ext,
-              fileName: completedTask.metadata.fileName,
-              filePath: completedTask.metadata.filePath,
-              status: 'completed',
-              downloadedSize: completedTask.downloaded,
-              fileSize: completedTask.total,
-              addedTime: Date.now(),
-              completedTime: Date.now(),
-              errorMessage: null,
-            }
-
-            addHistory(historyItem)
-            removeTask(completedTaskId)
-
-            await saveDownloadTasks(downloadState.tasks.filter(t => t.id !== completedTaskId))
-            await saveDownloadHistory([...downloadState.history])
-
-            downloadEvent.downloadListUpdate()
-            downloadEvent.downloadHistoryUpdate()
-          },
-          async(completedTaskId, error) => {
-            updateTask(completedTaskId, {
-              status: 'error',
-              statusText: error,
-            })
-            await saveDownloadTasks([...downloadState.tasks])
-            downloadEvent.downloadListUpdate()
-            toast(global.i18n.t('download_failed') + ': ' + error)
-          },
-        )
-      } catch (err: any) {
-        console.error('[Download] Failed to add task:', err)
-        updateTask(taskId, {
-          status: 'error',
-          statusText: err.message || global.i18n.t('download_failed'),
-        })
-        await saveDownloadTasks([...downloadState.tasks])
-        downloadEvent.downloadListUpdate()
-        toast(global.i18n.t('download_failed'))
-      }
-    })()
+    void runTask(taskId)
 
     return true
   } catch (err: any) {
@@ -275,11 +286,17 @@ const addTaskWithDownload = async(musicInfo: LX.Music.MusicInfoOnline, quality?:
 const deleteTask = async(taskId: string): Promise<void> => {
   const task = downloadState.tasks.find(t => t.id === taskId)
   if (task) {
-    if (task.status === 'run') {
-      stopDownload(taskId)
-    }
+    // 先停止原生下载(排队中的任务会从队列移除),再删掉半成品文件
+    stopDownload(taskId)
     removeTask(taskId)
     await saveDownloadTasks([...downloadState.tasks])
+
+    try {
+      await unlink(task.metadata.filePath)
+    } catch {
+      // 文件可能还没创建
+    }
+
     downloadEvent.downloadListUpdate()
     return
   }
@@ -300,7 +317,42 @@ const deleteTask = async(taskId: string): Promise<void> => {
   }
 }
 
+/**
+ * 重试下载任务
+ * - 当前任务列表里失败/已暂停的任务:原地重置并重新获取地址下载
+ * - 历史记录里失败的任务:移出历史,作为新任务重新下载
+ */
 const retryTask = async(taskId: string): Promise<boolean> => {
+  const task = downloadState.tasks.find(t => t.id === taskId)
+  if (task) {
+    if (task.status !== 'error' && task.status !== 'pause') return false
+
+    // 清掉可能残留的半成品文件,避免续写出错
+    try {
+      await unlink(task.metadata.filePath)
+    } catch {
+      // 文件可能不存在
+    }
+
+    updateTask(taskId, {
+      isComplate: false,
+      status: 'waiting',
+      statusText: global.i18n.t('download_waiting_for_url'),
+      downloaded: 0,
+      total: 0,
+      progress: 0,
+      speed: '',
+      metadata: { ...task.metadata, url: null },
+    })
+    await saveDownloadTasks([...downloadState.tasks])
+    downloadEvent.downloadListUpdate()
+
+    toast(global.i18n.t('download_retry_started'))
+
+    void runTask(taskId, true)
+    return true
+  }
+
   const historyItem = downloadState.history.find(h => h.id === taskId)
   if (!historyItem) return false
 
@@ -312,6 +364,7 @@ const retryTask = async(taskId: string): Promise<boolean> => {
 }
 
 const clearAllHistory = async(): Promise<void> => {
+  // 正在进行的任务不受影响,历史记录里的文件保留
   setHistory([])
   await saveDownloadHistory([])
   downloadEvent.downloadHistoryUpdate()

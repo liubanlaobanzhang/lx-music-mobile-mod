@@ -574,5 +574,11 @@
   "download_delete_file": "删除本地文件",
   "share": "分享",
   "nav_permission": "权限管理",
-  "nav_log": "日志记录"
+  "nav_log": "日志记录",
+  "download_delete": "删除",
+  "download_url_failed": "获取下载地址失败",
+  "download_waiting_for_url": "正在获取下载地址",
+  "download_retry_started": "已重新开始下载",
+  "download_status_paused": "已暂停",
+  "setting_download": "下载设置"
 }
